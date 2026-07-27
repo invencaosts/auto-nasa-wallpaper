@@ -1,13 +1,17 @@
 package com.example.nasa_apod;
 
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
+import org.springframework.web.util.UriComponentsBuilder;
 
 import java.io.InputStream;
+import java.net.URI;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -26,7 +30,11 @@ public class ApodService implements CommandLineRunner {
     @Value("${nasa.download.dir:nasa-images}")
     private String downloadDir;
 
+    @Value("${nasa.translate.target-lang:pt}")
+    private String translateTargetLang;
+
     private final RestTemplate restTemplate;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     public ApodService() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
@@ -122,6 +130,7 @@ public class ApodService implements CommandLineRunner {
                     if (exitCode == 0) {
                         logger.info("Wallpaper created successfully at: " + wallpaperPath.toAbsolutePath());
                         setUbuntuWallpaper(wallpaperPath.toAbsolutePath().toString());
+                        sendDescriptionNotification(response.getTitle(), response.getExplanation());
                     } else {
                         logger.warning("ImageMagick convert failed with exit code " + exitCode);
                         String output = new String(process.getInputStream().readAllBytes());
@@ -144,6 +153,79 @@ public class ApodService implements CommandLineRunner {
             }
         } catch (Exception e) {
             logger.severe("Unexpected error processing APOD: " + e.getMessage());
+        }
+    }
+
+    private static final int TEASER_LENGTH = 200;
+
+    private void sendDescriptionNotification(String title, String explanation) {
+        try {
+            logger.info("Sending description notification...");
+            String translatedTitle = translateText(title);
+            String translatedExplanation = translateText(explanation);
+
+            String teaser = translatedExplanation.length() > TEASER_LENGTH
+                    ? translatedExplanation.substring(0, TEASER_LENGTH) + "..."
+                    : translatedExplanation;
+
+            ProcessBuilder pb = new ProcessBuilder(
+                    "notify-send",
+                    "--icon=dialog-information",
+                    "-A", "ver=Ver descrição completa",
+                    translatedTitle,
+                    teaser
+            );
+            pb.redirectErrorStream(false);
+            Process process = pb.start();
+            String chosenAction = new String(process.getInputStream().readAllBytes()).trim();
+            process.waitFor();
+
+            if ("ver".equals(chosenAction)) {
+                showFullDescription(translatedTitle, translatedExplanation);
+            }
+        } catch (Exception e) {
+            logger.warning("Could not send description notification: " + e.getMessage());
+        }
+    }
+
+    private void showFullDescription(String title, String explanation) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(
+                    "zenity",
+                    "--info",
+                    "--title=" + title,
+                    "--text=" + explanation,
+                    "--width=500"
+            );
+            pb.start();
+        } catch (Exception e) {
+            logger.warning("Could not show full description dialog: " + e.getMessage());
+        }
+    }
+
+    private String translateText(String text) {
+        try {
+            URI uri = UriComponentsBuilder.fromUriString("https://translate.googleapis.com/translate_a/single")
+                    .queryParam("client", "gtx")
+                    .queryParam("sl", "en")
+                    .queryParam("tl", translateTargetLang)
+                    .queryParam("dt", "t")
+                    .queryParam("q", text)
+                    .build()
+                    .encode()
+                    .toUri();
+
+            byte[] response = restTemplate.getForObject(uri, byte[].class);
+            JsonNode root = objectMapper.readTree(response);
+
+            StringBuilder translated = new StringBuilder();
+            for (JsonNode segment : root.get(0)) {
+                translated.append(segment.get(0).asText());
+            }
+            return translated.toString();
+        } catch (Exception e) {
+            logger.warning("Translation failed, falling back to original text: " + e.getMessage());
+            return text;
         }
     }
 
